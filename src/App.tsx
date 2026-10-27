@@ -1,14 +1,12 @@
-import { useMemo, useState, type FormEvent } from 'react'
-import { ArrowRight, ArrowUpRight, Banknote, Bell, CalendarDays, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleDollarSign, Clock3, FileUp, LayoutDashboard, Paperclip, Search, UserRoundPlus, UsersRound, X } from 'lucide-react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { ArrowRight, ArrowUpRight, Banknote, Bell, CalendarDays, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleDollarSign, Clock3, FileUp, LayoutDashboard, LogOut, Paperclip, Search, UserRoundPlus, UsersRound, X } from 'lucide-react'
+import type { Session } from '@supabase/supabase-js'
+import { createClientRecord, createReceiptUrl, fetchClients, markInstallmentPaid, saveInstallmentReceipt, type Client, type Installment } from './lib/clients'
+import { isSupabaseConfigured, requireSupabase } from './lib/supabase'
 import './App.css'
 
 type Page = 'dashboard' | 'cadastro' | 'consulta'
-type InstallmentStatus = 'paid' | 'open'
-interface Installment { id: string; number: number; amount: number; dueDate: string; status: InstallmentStatus; paidAt?: string; receiptName?: string; receiptData?: string }
-interface Client { id: string; name: string; cpf: string; address: string; phone: string; principal: number; interest: number; installmentCount: number; createdAt: string; installments: Installment[] }
 
-const STORAGE_KEY = 'fluxo-clients-v2'
-const LEGACY_STORAGE_KEY = 'fluxo-clients-v1'
 const currency = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' })
 const monthLabel = new Intl.DateTimeFormat('pt-BR', { month: 'long', year: 'numeric' })
 const currentDate = new Date()
@@ -28,32 +26,73 @@ function makeInstallments(total: number, count: number, firstDueDate: string, pa
   })
 }
 
-function loadClients(): Client[] {
-  try {
-    localStorage.removeItem(LEGACY_STORAGE_KEY)
-    const saved = localStorage.getItem(STORAGE_KEY)
-    return saved ? JSON.parse(saved) as Client[] : []
-  } catch {
-    return []
-  }
-}
-
 function installmentState(item: Installment): 'paid' | 'open' | 'late' { return item.status === 'paid' ? 'paid' : item.dueDate < iso(currentDate) ? 'late' : 'open' }
 function paidCount(client: Client) { return client.installments.filter((item) => item.status === 'paid').length }
 function cpfMask(value: string) { return value.replace(/\D/g, '').slice(0, 11).replace(/(\d{3})(\d)/, '$1.$2').replace(/(\d{3})(\d)/, '$1.$2').replace(/(\d{3})(\d{1,2})$/, '$1-$2') }
 
 function App() {
-  const [clients, setClients] = useState<Client[]>(loadClients)
+  const [clients, setClients] = useState<Client[]>([])
   const [page, setPage] = useState<Page>('dashboard')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [query, setQuery] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [notice, setNotice] = useState('')
+  const [dataError, setDataError] = useState('')
+  const [authReady, setAuthReady] = useState(!isSupabaseConfigured)
+  const [dataLoading, setDataLoading] = useState(isSupabaseConfigured)
   const [selectedMonth, setSelectedMonth] = useState(currentDate.getMonth() + 1)
   const [selectedYear, setSelectedYear] = useState(currentDate.getFullYear())
   const [form, setForm] = useState({ name: '', cpf: '', address: '', phone: '', principal: '', interest: '', count: '10', firstDue: '' })
+  const [authSession, setAuthSession] = useState<Session | null>(null)
   const today = iso(currentDate)
   const selectedMonthKey = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}`
+
+  useEffect(() => {
+    let active = true
+    const client = getSupabaseOrNull()
+    if (!client) return
+
+    client.auth.getSession().then(({ data, error }) => {
+      if (!active) return
+      if (error) setDataError(`Não foi possível verificar a sessão: ${error.message}`)
+      setAuthSession(data.session)
+      setDataLoading(Boolean(data.session))
+      setAuthReady(true)
+    }).catch((error: unknown) => {
+      if (!active) return
+      setDataError(`Não foi possível conectar ao Supabase: ${errorMessage(error)}`)
+      setDataLoading(false)
+      setAuthReady(true)
+    })
+
+    const { data: { subscription } } = client.auth.onAuthStateChange((_event, nextSession) => {
+      setAuthSession(nextSession)
+      setDataLoading(Boolean(nextSession))
+      setDataError('')
+      if (!nextSession) setClients([])
+    })
+
+    return () => {
+      active = false
+      subscription.unsubscribe()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!authSession) return
+
+    let active = true
+    fetchClients(authSession.user).then((loadedClients) => {
+      if (active) setClients(loadedClients)
+    }).catch((error: unknown) => {
+      if (active) setDataError(`Não foi possível carregar os dados do Supabase: ${errorMessage(error)}`)
+    }).finally(() => {
+      if (active) setDataLoading(false)
+    })
+
+    return () => { active = false }
+  }, [authSession])
+
   const metrics = useMemo(() => {
     const monthly = clients.filter((client) => client.createdAt.startsWith(selectedMonthKey))
     const allItems = clients.flatMap((client) => client.installments)
@@ -69,32 +108,80 @@ function App() {
   const upcoming = clients.flatMap((client) => client.installments.filter((item) => item.dueDate.startsWith(selectedMonthKey) && item.status !== 'paid').map((item) => ({ client, item, state: installmentState(item) }))).sort((a, b) => a.item.dueDate.localeCompare(b.item.dueDate)).slice(0, 5)
   const matches = clients.filter((client) => client.name.toLocaleLowerCase('pt-BR').includes(query.trim().toLocaleLowerCase('pt-BR')) || client.cpf.includes(query.trim()))
 
-  function saveClients(next: Client[]) { setClients(next); localStorage.setItem(STORAGE_KEY, JSON.stringify(next)) }
   function notify(message: string) { setNotice(message); window.setTimeout(() => setNotice(''), 3200) }
-  function saveClient(event: FormEvent<HTMLFormElement>) {
+  async function saveClient(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const principal = Number(form.principal); const interest = Number(form.interest); const count = Number(form.count)
     if (form.cpf.replace(/\D/g, '').length !== 11) return notify('Confira o CPF: ele precisa ter 11 dígitos.')
     if (!principal || interest < 0 || count < 1 || !form.firstDue) return notify('Preencha os valores e a primeira data de vencimento.')
     const client: Client = { id: crypto.randomUUID(), name: form.name.trim(), cpf: form.cpf, address: form.address.trim(), phone: form.phone.trim(), principal, interest, installmentCount: count, createdAt: today, installments: makeInstallments(principal + interest, count, form.firstDue) }
-    saveClients([client, ...clients]); setSelectedId(client.id); setPage('consulta')
-    setForm({ name: '', cpf: '', address: '', phone: '', principal: '', interest: '', count: '10', firstDue: '' })
-    notify('Cadastro criado. As parcelas já estão disponíveis na consulta.')
+    if (!authSession) return notify('Entre na sua conta para salvar o cadastro.')
+    try {
+      await createClientRecord(client, authSession.user.id)
+      setClients((current) => [client, ...current]); setSelectedId(client.id); setPage('consulta')
+      setForm({ name: '', cpf: '', address: '', phone: '', principal: '', interest: '', count: '10', firstDue: '' })
+      notify('Cadastro salvo no Supabase. As parcelas já estão disponíveis na consulta.')
+    } catch (error) {
+      notify(`Não foi possível salvar o cadastro no Supabase: ${errorMessage(error)}`)
+    }
   }
-  function markPaid(clientId: string, installmentId: string) {
-    saveClients(clients.map((client) => client.id !== clientId ? client : { ...client, installments: client.installments.map((item) => item.id === installmentId ? { ...item, status: 'paid', paidAt: today } : item) }))
-    notify('Parcela baixada como paga.')
+  async function markPaid(clientId: string, installmentId: string) {
+    if (!authSession) return notify('Entre na sua conta para registrar o pagamento.')
+    try {
+      await markInstallmentPaid(installmentId, authSession.user.id, today)
+      setClients((current) => current.map((client) => client.id !== clientId ? client : { ...client, installments: client.installments.map((item) => item.id === installmentId ? { ...item, status: 'paid', paidAt: today } : item) }))
+      notify('Pagamento salvo no Supabase.')
+    } catch (error) {
+      notify(`Não foi possível registrar o pagamento: ${errorMessage(error)}`)
+    }
   }
-  function attachReceipt(clientId: string, installmentId: string, file?: File) {
+  async function attachReceipt(clientId: string, installmentId: string, file?: File) {
     if (!file) return
     if (file.size > 2 * 1024 * 1024) return notify('O comprovante precisa ter até 2 MB.')
-    const reader = new FileReader()
-    reader.onload = () => {
-      saveClients(clients.map((client) => client.id !== clientId ? client : { ...client, installments: client.installments.map((item) => item.id === installmentId ? { ...item, receiptName: file.name, receiptData: String(reader.result) } : item) }))
-      notify('Comprovante anexado à parcela.')
+    if (!authSession) return notify('Entre na sua conta para anexar um comprovante.')
+    const installment = clients.find((client) => client.id === clientId)?.installments.find((item) => item.id === installmentId)
+    if (!installment) return notify('Não foi possível localizar a parcela.')
+    try {
+      const saved = await saveInstallmentReceipt(clientId, installment, authSession.user.id, file)
+      setClients((current) => current.map((client) => client.id !== clientId ? client : { ...client, installments: client.installments.map((item) => item.id === installmentId ? saved : item) }))
+      notify('Comprovante salvo no Supabase Storage.')
+    } catch (error) {
+      notify(`Não foi possível salvar o comprovante: ${errorMessage(error)}`)
     }
-    reader.readAsDataURL(file)
   }
+  async function openReceipt(path: string) {
+    const windowReference = window.open('about:blank', '_blank')
+    if (!windowReference) return notify('Permita pop-ups para abrir o comprovante.')
+    try {
+      windowReference.location.href = await createReceiptUrl(path)
+    } catch (error) {
+      windowReference.close()
+      notify(`Não foi possível abrir o comprovante: ${errorMessage(error)}`)
+    }
+  }
+  async function signOut() {
+    try {
+      const { error } = await requireSupabase().auth.signOut()
+      if (error) throw error
+    } catch (error) {
+      notify(`Não foi possível sair da conta: ${errorMessage(error)}`)
+    }
+  }
+
+  if (!isSupabaseConfigured) return <AuthScreen configured={false} onAuthenticate={async () => undefined} />
+  if (!authReady) return <ConnectionState message="Conectando ao Supabase..." />
+  if (!authSession) return <AuthScreen configured onAuthenticate={async (email, password, createAccount) => {
+    const client = requireSupabase()
+    const result = createAccount
+      ? await client.auth.signUp({ email, password })
+      : await client.auth.signInWithPassword({ email, password })
+    if (result.error) throw result.error
+    return createAccount && !result.data.session
+      ? 'Conta criada. Verifique seu e-mail para confirmar o acesso antes de entrar.'
+      : undefined
+  }} />
+  if (dataLoading) return <ConnectionState message="Carregando seus dados do Supabase..." />
+  if (dataError) return <ConnectionState message={dataError} onRetry={() => { setDataError(''); setDataLoading(true); setAuthSession({ ...authSession }) }} />
 
   const title = page === 'dashboard' ? 'Visão geral' : page === 'cadastro' ? 'Novo empréstimo' : 'Clientes e parcelas'
   const nav: { id: Page; label: string; icon: typeof LayoutDashboard }[] = [{ id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard }, { id: 'cadastro', label: 'Cadastro', icon: UserRoundPlus }, { id: 'consulta', label: 'Consulta', icon: Search }]
@@ -108,7 +195,7 @@ function App() {
     </aside>
 
     <main className="main-area">
-      <header className="topbar"><div className="breadcrumbs"><span>Fluxo</span><ChevronRight size={14} /><span>{title}</span></div><div className="topbar-actions"><span className="today-label"><CalendarDays size={15} />{new Intl.DateTimeFormat('pt-BR', { dateStyle: 'medium' }).format(currentDate)}</span><button className="icon-button notification-button" type="button" title="Ver parcelas em atraso" aria-label={`${metrics.overdue} parcelas em atraso`} onClick={() => setPage('consulta')}><Bell size={18} /><span className="notification-dot" /></button><span className="user-avatar">FC</span></div></header>
+      <header className="topbar"><div className="breadcrumbs"><span>Fluxo</span><ChevronRight size={14} /><span>{title}</span></div><div className="topbar-actions"><span className="today-label"><CalendarDays size={15} />{new Intl.DateTimeFormat('pt-BR', { dateStyle: 'medium' }).format(currentDate)}</span><button className="icon-button notification-button" type="button" title="Ver parcelas em atraso" aria-label={`${metrics.overdue} parcelas em atraso`} onClick={() => setPage('consulta')}><Bell size={18} /><span className="notification-dot" /></button><span className="user-avatar" title={authSession.user.email}>{authSession.user.email?.slice(0, 2).toUpperCase() || 'FC'}</span><button className="icon-button" type="button" title="Sair da conta" aria-label="Sair da conta" onClick={signOut}><LogOut size={17} /></button></div></header>
       <div className="page-content">
         <div className="page-heading"><div><div className="eyebrow">{page === 'dashboard' ? 'PAINEL FINANCEIRO' : page === 'cadastro' ? 'CARTEIRA / CADASTRO' : 'CARTEIRA / CONSULTA'}</div><h1>{title}</h1></div></div>
         {page === 'dashboard' && <Dashboard metrics={metrics} upcoming={upcoming} clients={clients} seeAll={() => setPage('consulta')} select={(id) => { setSelectedId(id); setPage('consulta') }} create={() => setPage('cadastro')} selectedMonth={selectedMonth} selectedYear={selectedYear} onMonthChange={setSelectedMonth} onYearChange={setSelectedYear} />}
@@ -133,11 +220,62 @@ function App() {
           </form>
           <aside className="form-aside"><div className="aside-number">01 <span>/ 01</span></div><h3>Um contrato claro começa com os dados certos.</h3><p>O total do contrato soma o valor emprestado aos juros. As parcelas são calculadas automaticamente e organizadas por vencimento.</p><div className="aside-rule" /><div className="aside-example"><span>SIMULAÇÃO</span><div><strong>R$ 1.000,00</strong><small>Valor emprestado</small></div><ArrowRight size={16} /><div><strong>+ R$ 300,00</strong><small>Juros totais</small></div><div className="aside-total"><span>Total do contrato</span><strong>R$ 1.300,00</strong></div></div></aside>
         </section>}
-        {page === 'consulta' && <Consultation clients={matches} query={query} setQuery={setQuery} selectedId={selectedId} select={(id) => setSelectedId(selectedId === id ? null : id)} markPaid={markPaid} attach={attachReceipt} />}
+        {page === 'consulta' && <Consultation clients={matches} query={query} setQuery={setQuery} selectedId={selectedId} select={(id) => setSelectedId(selectedId === id ? null : id)} markPaid={markPaid} attach={attachReceipt} openReceipt={openReceipt} />}
       </div>
     </main>
     {notice && <div className="toast" role="status"><CheckCircle2 size={18} />{notice}<button type="button" onClick={() => setNotice('')} aria-label="Fechar aviso"><X size={15} /></button></div>}
   </div>
+}
+
+function getSupabaseOrNull() {
+  return isSupabaseConfigured ? requireSupabase() : null
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : 'erro desconhecido'
+}
+
+function ConnectionState({ message, onRetry }: { message: string; onRetry?: () => void }) {
+  return <main className="auth-page"><section className="auth-card"><span className="brand-mark auth-brand-mark"><CircleDollarSign size={22} /></span><strong className="auth-brand-name">fluxo</strong><p>{message}</p>{onRetry && <button className="primary-button" type="button" onClick={onRetry}>Tentar novamente</button>}</section></main>
+}
+
+function AuthScreen({ configured, onAuthenticate }: { configured: boolean; onAuthenticate: (email: string, password: string, createAccount: boolean) => Promise<string | undefined> }) {
+  const [createAccount, setCreateAccount] = useState(false)
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setMessage('')
+    setError('')
+    setSubmitting(true)
+    try {
+      const result = await onAuthenticate(email.trim(), password, createAccount)
+      if (result) setMessage(result)
+    } catch (submitError) {
+      setError(`Não foi possível ${createAccount ? 'criar a conta' : 'entrar'}: ${errorMessage(submitError)}`)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return <main className="auth-page"><section className="auth-card">
+    <span className="brand-mark auth-brand-mark"><CircleDollarSign size={22} /></span>
+    <strong className="auth-brand-name">fluxo</strong>
+    <h1>{configured ? createAccount ? 'Crie sua conta' : 'Acesse sua carteira' : 'Conecte o Supabase'}</h1>
+    <p>{configured ? 'Seus contratos e comprovantes ficam protegidos no Supabase.' : 'Configure as credenciais do projeto para habilitar o armazenamento seguro.'}</p>
+    {!configured ? <div className="auth-setup-help">Copie <code>.env.example</code> para <code>.env.local</code>, preencha a URL e a chave publicável do Supabase e reinicie o servidor.</div> : <form className="auth-form" onSubmit={submit}>
+      <label className="field"><span>E-mail</span><input required type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+      <label className="field"><span>Senha</span><input required type="password" minLength={8} autoComplete={createAccount ? 'new-password' : 'current-password'} value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+      {message && <p className="auth-message" role="status">{message}</p>}
+      {error && <p className="auth-error" role="alert">{error}</p>}
+      <button className="primary-button" type="submit" disabled={submitting}>{submitting ? 'Aguarde...' : createAccount ? 'Criar conta' : 'Entrar'}</button>
+      <button className="auth-toggle" type="button" onClick={() => { setCreateAccount(!createAccount); setError(''); setMessage('') }}>{createAccount ? 'Já tem conta? Entrar' : 'Criar uma conta'}</button>
+    </form>}
+  </section></main>
 }
 
 type Metrics = { lent: number; profit: number; active: number; receivable: number; overdue: number; monthlyCount: number }
@@ -178,7 +316,7 @@ function ClientName({ client }: { client: Client }) { return <div className="cli
 function StatusPill({ status }: { status: 'paid' | 'open' | 'late' }) { return <span className={`status-pill status-${status}`}><i />{status === 'paid' ? 'Paga' : status === 'late' ? 'Atrasada' : 'Em aberto'}</span> }
 function EmptyState({ title, body, action, onAction }: { title: string; body: string; action?: string; onAction?: () => void }) { return <div className="empty-state"><div className="empty-icon"><Banknote size={21} /></div><strong>{title}</strong><p>{body}</p>{action && onAction && <button className="text-action" type="button" onClick={onAction}>{action}<ArrowRight size={14} /></button>}</div> }
 
-function Consultation({ clients, query, setQuery, selectedId, select, markPaid, attach }: { clients: Client[]; query: string; setQuery: (value: string) => void; selectedId: string | null; select: (id: string) => void; markPaid: (clientId: string, installmentId: string) => void; attach: (clientId: string, installmentId: string, file?: File) => void }) {
+function Consultation({ clients, query, setQuery, selectedId, select, markPaid, attach, openReceipt }: { clients: Client[]; query: string; setQuery: (value: string) => void; selectedId: string | null; select: (id: string) => void; markPaid: (clientId: string, installmentId: string) => void; attach: (clientId: string, installmentId: string, file?: File) => void; openReceipt: (path: string) => void }) {
   const [filter, setFilter] = useState('all')
   const visible = clients.filter((client) => filter === 'active' ? client.installments.some((item) => item.status !== 'paid') : filter === 'late' ? client.installments.some((item) => installmentState(item) === 'late') : filter === 'paid' ? client.installments.every((item) => item.status === 'paid') : true)
   return <section className="surface consultation-panel"><div className="consultation-toolbar"><div><span className="section-kicker">CARTEIRA DE CLIENTES</span><h2>Acompanhe cada contrato</h2><p>Abra um cliente para consultar parcelas e registrar pagamentos.</p></div><div className="client-count"><strong>{visible.length}</strong><span>{visible.length === 1 ? 'cliente' : 'clientes'}</span></div></div>
@@ -187,7 +325,7 @@ function Consultation({ clients, query, setQuery, selectedId, select, markPaid, 
       const paid = paidCount(client); const outstanding = client.installments.filter((item) => item.status !== 'paid').reduce((sum, item) => sum + item.amount, 0); const late = client.installments.filter((item) => installmentState(item) === 'late').length; const open = selectedId === client.id
       return <article className={`client-record ${open ? 'record-open' : ''}`} key={client.id}><button className="client-record-head" type="button" onClick={() => select(client.id)} aria-expanded={open}><span className="client-initials large-initials">{client.name.split(' ').slice(0, 2).map((part) => part[0]).join('')}</span><span className="record-name"><strong>{client.name}</strong><small>{client.cpf}<i />Desde {fmtDate(client.createdAt)}</small></span><span className="record-progress"><span>Parcelas pagas</span><strong>{paid}<i> / {client.installmentCount}</i></strong><span className="mini-progress"><i style={{ width: `${paid / client.installmentCount * 100}%` }} /></span></span><span className="record-outstanding"><span>Saldo a receber</span><strong>{currency.format(outstanding)}</strong>{late > 0 && <small className="late-note"><i />{late} em atraso</small>}</span><ChevronDown className={`record-chevron ${open ? 'rotated' : ''}`} size={18} /></button>
         {open && <div className="client-details"><div className="detail-strip"><div><span>VALOR EMPRESTADO</span><strong>{currency.format(client.principal)}</strong></div><div><span>JUROS DO CONTRATO</span><strong className="profit-value">{currency.format(client.interest)}</strong></div><div><span>TOTAL DO CONTRATO</span><strong>{currency.format(client.principal + client.interest)}</strong></div><div><span>ENDEREÇO</span><strong>{client.address || 'Não informado'}</strong></div></div><div className="installment-heading"><div><strong>Parcelas do contrato</strong><span>{paid} de {client.installmentCount} pagas</span></div><div className="status-legend"><span><i className="dot-paid" />Paga</span><span><i className="dot-open" />Em aberto</span><span><i className="dot-late" />Atrasada</span></div></div>
-          <div className="installment-list">{client.installments.map((item) => { const state = installmentState(item); return <div className={`installment-row installment-${state}`} key={item.id}><span className="installment-number">{String(item.number).padStart(2, '0')}<small>/{client.installmentCount}</small></span><span className="installment-date"><strong>{fmtDate(item.dueDate)}</strong><small>{state === 'paid' ? `Pago em ${fmtDate(item.paidAt || item.dueDate)}` : 'Data de vencimento'}</small></span><span className="installment-amount">{currency.format(item.amount)}</span><StatusPill status={state} /><span className="installment-actions"><label className={`receipt-button ${item.receiptName ? 'has-receipt' : ''}`} title={item.receiptName || 'Anexar comprovante'}><Paperclip size={15} />{item.receiptName ? 'Comprovante' : 'Anexar'}<input type="file" accept="image/*,.pdf" onChange={(event) => { attach(client.id, item.id, event.target.files?.[0]); event.currentTarget.value = '' }} /></label>{state !== 'paid' && <button className="mark-paid-button" type="button" onClick={() => markPaid(client.id, item.id)} title="Marcar parcela como paga"><Check size={14} />Baixar</button>}{item.receiptData && <a className="receipt-open" href={item.receiptData} download={item.receiptName} title={`Abrir ${item.receiptName}`}><FileUp size={15} /></a>}</span></div> })}</div>
+          <div className="installment-list">{client.installments.map((item) => { const state = installmentState(item); return <div className={`installment-row installment-${state}`} key={item.id}><span className="installment-number">{String(item.number).padStart(2, '0')}<small>/{client.installmentCount}</small></span><span className="installment-date"><strong>{fmtDate(item.dueDate)}</strong><small>{state === 'paid' ? `Pago em ${fmtDate(item.paidAt || item.dueDate)}` : 'Data de vencimento'}</small></span><span className="installment-amount">{currency.format(item.amount)}</span><StatusPill status={state} /><span className="installment-actions"><label className={`receipt-button ${item.receiptName ? 'has-receipt' : ''}`} title={item.receiptName || 'Anexar comprovante'}><Paperclip size={15} />{item.receiptName ? 'Comprovante' : 'Anexar'}<input type="file" accept="image/*,.pdf" onChange={(event) => { attach(client.id, item.id, event.target.files?.[0]); event.currentTarget.value = '' }} /></label>{state !== 'paid' && <button className="mark-paid-button" type="button" onClick={() => markPaid(client.id, item.id)} title="Marcar parcela como paga"><Check size={14} />Baixar</button>}{item.receiptPath && <button className="receipt-open" type="button" onClick={() => { if (item.receiptPath) void openReceipt(item.receiptPath) }} title={`Abrir ${item.receiptName}`}><FileUp size={15} /></button>}</span></div> })}</div>
         </div>}
       </article>
     })}</div>}

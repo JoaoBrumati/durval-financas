@@ -636,3 +636,28 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
     border-right-color: var(--border);
   }
 }
+
+.auth-page { display: grid; min-height: 100vh; place-items: center; padding: 24px; background: var(--paper); }
+.auth-card { width: min(100%, 410px); padding: 34px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: 0 12px 40px rgba(25,49,39,.08); }
+.auth-brand-mark { width: 44px; height: 44px; margin-bottom: 12px; color: #d7e7dc; }
+.auth-brand-name { display: block; color: var(--green); font-family: 'Iowan Old Style', 'Palatino Linotype', Georgia, serif; font-size: 26px; }
+.auth-card h1 { margin: 24px 0 7px; color: #20372d; font-family: 'Iowan Old Style', 'Palatino Linotype', Georgia, serif; font-size: 26px; font-weight: 500; }
+.auth-card > p { color: #78837c; font-size: 12px; }
+.auth-form { display: grid; gap: 15px; margin-top: 23px; }
+.auth-form .field { gap: 6px; }
+.auth-form .primary-button { width: 100%; margin-top: 3px; }
+.auth-form .primary-button:disabled { cursor: wait; opacity: .7; }
+.auth-toggle { padding: 5px; border: 0; color: #397258; background: none; font-size: 11px; cursor: pointer; }
+.auth-message, .auth-error, .auth-setup-help { padding: 11px 12px; border-radius: 4px; font-size: 11px; }
+.auth-message { color: #315c47 !important; background: #edf5ef; }
+.auth-error { color: #9c3e35 !important; background: #fbefec; }
+.auth-setup-help { margin-top: 20px; color: #53645a; background: #f2f5f0; line-height: 1.7; }
+.auth-setup-help code { padding: 2px 4px; border-radius: 3px; background: #e4eae3; font-family: ui-monospace, Consolas, monospace; }
+.auth-card > .primary-button { margin-top: 20px; }
+.auth-page .auth-card > p { margin-top: 4px; }
+.auth-card .primary-button { min-height: 42px; }
+.auth-card .primary-button:focus-visible, .auth-toggle:focus-visible { outline: 2px solid #77a48c; outline-offset: 3px; }
+
+@media (max-width: 480px) {
+  .auth-card { padding: 26px 21px; }
+}
